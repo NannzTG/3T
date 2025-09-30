@@ -17,8 +17,7 @@ logging.basicConfig(filename="sync_log.txt", level=logging.INFO, format="%(ascti
 load_dotenv()
 
 KOBO_TOKEN = os.getenv("KOBO_TOKEN")
-TREE_FORM_ID = os.getenv("TREE_FORM_ID")
-SEED_FORM_ID = os.getenv("SEED_FORM_ID")
+KOBO_FORM_ID = os.getenv("KOBO_FORM_ID")
 DB_USER = os.getenv("DB_USER")
 DB_PASSWORD = os.getenv("DB_PASSWORD")
 DB_HOST = os.getenv("DB_HOST")
@@ -54,17 +53,22 @@ def clean_gps(record):
     geo = record.get("_geolocation")
     if geo and isinstance(geo, list) and len(geo) == 2 and all(geo):
         cleaned = f"{geo[0]},{geo[1]}"
+        print(f"✅ Cleaned GPS from _geolocation for record {record.get('_id')}: {cleaned}")
         return cleaned
+
     raw_gps = record.get("GPS_LOCATION")
     if raw_gps:
         parts = raw_gps.split()
         if len(parts) >= 2:
             cleaned = f"{parts[0]},{parts[1]}"
+            print(f"✅ Cleaned GPS from GPS_LOCATION for record {record.get('_id')}: {cleaned}")
             return cleaned
+
+    print(f"❌ Missing GPS for record {record.get('_id')}")
     return ""
 
-def sync_kobo(form_id, model, is_tree=True):
-    print(f"🔄 Starting sync for {'Tree' if is_tree else 'Seed'} form...")
+def sync_kobo_single_form(form_id):
+    print(f"🔄 Starting sync for single Kobo form...")
     url = f"https://kf.kobotoolbox.org/api/v2/assets/{form_id}/data/?format=json"
     headers = {"Authorization": f"Token {KOBO_TOKEN}"}
     session = SessionLocal()
@@ -81,9 +85,11 @@ def sync_kobo(form_id, model, is_tree=True):
         raw_entry = KoboRawResponse(response_json=raw_response)
         session.add(raw_entry)
         session.commit()
+        print(f"📝 Raw Kobo response saved to database with ID {raw_entry.id}")
 
         response.raise_for_status()
         data = response.json().get("results", [])
+        print(f"✅ Fetched {len(data)} records from Kobo")
 
         for record in data:
             try:
@@ -91,20 +97,24 @@ def sync_kobo(form_id, model, is_tree=True):
                 if not kobo_id:
                     continue
 
-                region = region_map.get(record.get("DISTRICT_NAME", "").lower(), "UNK")
-                reserve = reserve_map.get(record.get("FOREST_RESERVE_NAME", "").lower(), "UNK")
-                species = record.get("SPECIES_NAME") or record.get("SPECIES")
-                species_code = generate_species_code(species)
-                unique_id = f"TREE-{kobo_id}" if is_tree else f"SEED-{kobo_id}"
-                qr_url = generate_qr(unique_id)
+                activity_type = record.get("activity_type")
+                if activity_type == "tree_tagging":
+                    region = region_map.get(record.get("DISTRICT_NAME", "").lower(), "UNK")
+                    reserve = reserve_map.get(record.get("FOREST_RESERVE_NAME", "").lower(), "UNK")
+                    species = record.get("SPECIES_NAME") or record.get("SPECIES")
+                    species_code = generate_species_code(species)
+                    unique_id = f"TREE-{kobo_id}"
+                    qr_url = generate_qr(unique_id)
 
-                filtered = filter_fields(record, Tree if is_tree else Seed)
+                    print(f"📦 Processing Tree record {unique_id}")
+                    logging.info(f"Processing Tree record {unique_id}")
 
-                # Add Kobo metadata fields if present
-                for meta in ["start", "end", "today", "username", "deviceid", "phonenumber"]:
-                    filtered[meta] = record.get(meta)
-                if is_tree:
+                    filtered = filter_fields(record, Tree)
                     filtered["GPS"] = clean_gps(record)
+                    # Add Kobo metadata fields if present
+                    for meta in ["start", "end", "today", "username", "deviceid", "phonenumber"]:
+                        filtered[meta] = record.get(meta)
+
                     tree = Tree(
                         **filtered,
                         TreeID=unique_id,
@@ -115,7 +125,24 @@ def sync_kobo(form_id, model, is_tree=True):
                         QRCodeURL=qr_url
                     )
                     session.add(tree)
-                else:
+                    session.commit()
+                    sync_log = SyncLog(TreeID=unique_id, Status="Success", Timestamp=datetime.utcnow())
+                    session.add(sync_log)
+                    session.commit()
+
+                elif activity_type == "seed_collection":
+                    species = record.get("SPECIES_NAME") or record.get("SPECIES")
+                    species_code = generate_species_code(species)
+                    unique_id = f"SEED-{kobo_id}"
+                    qr_url = generate_qr(unique_id)
+
+                    print(f"📦 Processing Seed record {unique_id}")
+                    logging.info(f"Processing Seed record {unique_id}")
+
+                    filtered = filter_fields(record, Seed)
+                    for meta in ["start", "end", "today", "username", "deviceid", "phonenumber"]:
+                        filtered[meta] = record.get(meta)
+
                     seed = Seed(
                         **filtered,
                         SeedID=unique_id,
@@ -124,29 +151,35 @@ def sync_kobo(form_id, model, is_tree=True):
                         QRCodeURL=qr_url
                     )
                     session.add(seed)
-
-                session.commit()
-
-                sync_log = SyncLog(TreeID=unique_id, Status="Success", Timestamp=datetime.utcnow())
-                session.add(sync_log)
-                session.commit()
+                    session.commit()
+                    sync_log = SyncLog(TreeID=unique_id, Status="Success", Timestamp=datetime.utcnow())
+                    session.add(sync_log)
+                    session.commit()
+                else:
+                    print(f"⚠️ Activity type {activity_type} not recognized for record {kobo_id}")
+                    logging.warning(f"Activity type {activity_type} not recognized for record {kobo_id}")
 
             except IntegrityError:
                 session.rollback()
                 sync_log = SyncLog(TreeID=unique_id, Status="Duplicate", Timestamp=datetime.utcnow())
                 session.add(sync_log)
                 session.commit()
+                print(f"⚠️ Duplicate record {unique_id}")
+                logging.warning(f"Duplicate record {unique_id}")
             except Exception as e:
                 session.rollback()
                 sync_log = SyncLog(TreeID=unique_id, Status=f"Error: {str(e)}", Timestamp=datetime.utcnow())
                 session.add(sync_log)
                 session.commit()
+                print(f"❌ Error syncing {unique_id}: {str(e)}")
+                logging.error(f"Error syncing {unique_id}: {str(e)}")
 
     except Exception as e:
+        print(f"❌ Sync failed: {str(e)}")
         logging.critical(f"Sync failed: {str(e)}")
     finally:
         session.close()
 
-# Run both syncs
-sync_kobo(TREE_FORM_ID, Tree, is_tree=True)
-sync_kobo(SEED_FORM_ID, Seed, is_tree=False)
+# Run single-form sync
+if __name__ == "__main__":
+    sync_kobo_single_form(KOBO_FORM_ID)
