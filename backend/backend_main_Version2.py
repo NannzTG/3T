@@ -1,0 +1,81 @@
+from fastapi import FastAPI, Depends, HTTPException
+from fastapi.responses import JSONResponse
+from fastapi.templating import Jinja2Templates
+from fastapi.requests import Request
+from fastapi.staticfiles import StaticFiles
+from sqlalchemy.orm import Session
+from database import SessionLocal, engine, Base
+import models, schemas, crud
+from kobo_sync_script import sync_kobo, TREE_FORM_ID, SEED_FORM_ID, Tree, Seed
+
+# Create tables
+Base.metadata.create_all(bind=engine)
+
+app = FastAPI()
+
+app.mount("/static", StaticFiles(directory="static"), name="static")
+templates = Jinja2Templates(directory="templates")
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+@app.post("/trees")
+def add_tree(tree: schemas.TreeCreate, db: Session = Depends(get_db)):
+    return crud.create_tree(db, tree)
+
+@app.post("/seeds")
+def add_seed(seed: schemas.SeedCreate, db: Session = Depends(get_db)):
+    return crud.create_seed(db, seed)
+
+@app.post("/sync")
+def log_sync(sync: schemas.SyncLogCreate, db: Session = Depends(get_db)):
+    return crud.log_sync(db, sync)
+
+@app.get("/scan/{tree_id}")
+def scan_tree(tree_id: str, request: Request, db: Session = Depends(get_db)):
+    tree = db.query(models.Tree).filter(models.Tree.TreeID == tree_id).first()
+    if not tree:
+        raise HTTPException(status_code=404, detail="Tree not found")
+    photos = [
+        tree.MOTHER_TREE_MAIN_PHOTO,
+        tree.MOTHER_TREE_NORTH_PHOTO,
+        tree.MOTHER_TREE_EAST_PHOTO,
+        tree.MOTHER_TREE_SOUTH_PHOTO,
+        tree.MOTHER_TREE_WEST_PHOTO,
+    ]
+    return templates.TemplateResponse("tree_detail.html", {
+        "request": request,
+        "tree": tree,
+        "photos": photos
+    })
+
+@app.get("/sync-kobo")
+def sync_kobo_data():
+    try:
+        sync_kobo(TREE_FORM_ID, Tree, is_tree=True)
+        sync_kobo(SEED_FORM_ID, Seed, is_tree=False)
+        return {"status": "Sync completed"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/trees/{tree_id}")
+def delete_tree(tree_id: str, db: Session = Depends(get_db)):
+    tree = db.query(models.Tree).filter(models.Tree.TreeID == tree_id).first()
+    if not tree:
+        raise HTTPException(status_code=404, detail="Tree not found")
+    db.delete(tree)
+    db.commit()
+    return {"message": f"Tree {tree_id} deleted successfully"}
+
+@app.delete("/seeds/{seed_id}")
+def delete_seed(seed_id: str, db: Session = Depends(get_db)):
+    seed = db.query(models.Seed).filter(models.Seed.SeedID == seed_id).first()
+    if not seed:
+        raise HTTPException(status_code=404, detail="Seed not found")
+    db.delete(seed)
+    db.commit()
+    return {"message": f"Seed {seed_id} deleted successfully"}
