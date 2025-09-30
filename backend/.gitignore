@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+env/
+venv/
+.venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Secrets
+.env
+.envrc
+
+# DB files
+db.sqlite3
+db.sqlite3-journal
+
+# Logs
+*.log
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Misc
+*.egg-info/
+*.egg
+build/
+dist/
