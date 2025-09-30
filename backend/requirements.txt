@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+sqlalchemy
+python-dotenv
+requests
+qrcode[pil]
+pillow
+mysql-connector-python
+PyMySQL
+jinja2
